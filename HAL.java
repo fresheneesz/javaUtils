@@ -1,6 +1,10 @@
 package com.offers.HAL;
 
+import org.apache.taglibs.standard.lang.jpath.example.Person;
 import org.hibernate.*;
+import org.hibernate.mapping.Column;
+import org.hibernate.metadata.ClassMetadata;
+import org.hibernate.persister.entity.AbstractEntityPersister;
 import org.hibernate.type.NullableType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -168,10 +172,9 @@ public class HAL {
                 // https://forum.hibernate.org/viewtopic.php?t=951275
                 // http://stackoverflow.com/questions/161224/what-are-the-differences-between-the-different-saving-methods-in-hibernate
 
-
                 boolean persist = true;
                 if(!session.contains(o)) {
-                    Serializable id = sessionFactory.getClassMetadata(o.getClass()).getIdentifier(o, EntityMode.POJO);
+                    Serializable id = getId(o);
                     if(id != null && !id.equals(new Long(0))) {                  // does the object exist in the database (if it has an id then it does)
                         persist = false;
                     }
@@ -191,6 +194,73 @@ public class HAL {
                 return null;
             }
         }));
+    }
+
+    /**
+     * Saves an object from an external database (which may have an id that needs to be set).
+     * this exists because I can't get hibernate to save an object that *has* an ID (because its from another database) - unbelievable
+     */
+    public <T> T saveExternal(T o) {
+        final Session session = getSession(true);
+
+        return runDatabaseAction("saving an external object into the database", true, o, new OfferUtil.GeneralRunnable<T, T>(new OfferUtil.Goable<T, T>() {
+            public T go(T o) throws Throwable {
+                Serializable id = getId(o);
+                String idProperty = getIdPropertyName(o);
+                String idColumnName = getColumnNameForProperty(o, idProperty);
+                String tableName = getTableName(o);
+
+                boolean save = true; // set to false if we should do an "insert"
+                List results = session.createSQLQuery("select "+idColumnName+" from "+tableName+" where "+idColumnName+"=:id limit 1").setParameter("id", id).list();
+                if(results.size() == 0) { // it exists!
+                    save = false;
+                }
+
+                if(save) {  // to save instead of insert, delete, then insert
+                    session.createSQLQuery("delete from "+tableName+" where "+idColumnName+"=:id").setParameter("id", id).executeUpdate();
+                }
+
+                session.save(o);
+                session.flush();
+
+                Serializable fakeId = getId(o);
+                session.createSQLQuery("update "+tableName+" set "+getIdPropertyName(o)+"=:realId where id=:fakeId")
+                    .setParameter("realId", id)
+                    .setParameter("fakeId", fakeId)
+                    .executeUpdate();
+
+                session.evict(o);
+                setId(o, id);
+
+                if(!transactional) {
+                    commit_internal();
+                    free();
+                }
+
+                return null;
+            }
+        }));
+    }
+
+
+    private <T> Serializable getId(T o) {
+        return sessionFactory.getClassMetadata(o.getClass()).getIdentifier(o, EntityMode.POJO);
+    }
+    private <T> void setId(T o, Serializable id) {
+        sessionFactory.getClassMetadata(o.getClass()).setIdentifier(o, id, EntityMode.POJO);
+    }
+
+    public String getIdPropertyName(Object o) {
+        return sessionFactory.getClassMetadata(o.getClass()).getIdentifierPropertyName();
+    }
+    public String getColumnNameForProperty(Object o, String property) {
+        return ((AbstractEntityPersister) sessionFactory.getClassMetadata(o.getClass())).getPropertyColumnNames(property)[0];
+    }
+
+    public String getTableName(Object o) {
+        ClassMetadata hibernateMetadata = sessionFactory.getClassMetadata(o.getClass());
+        AbstractEntityPersister persister = (AbstractEntityPersister) hibernateMetadata;
+        return persister.getTableName();
     }
 
     // deletes an object
